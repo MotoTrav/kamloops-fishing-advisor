@@ -5,11 +5,12 @@ from datetime import date
 from kamloops_fishing_advisor_fly_depth import season_from_date, recommend_flies_with_depth
 
 SHEET = "Lakes_2025_near_Kamloops"
+XLSX_PATH = "kamloops_stocking_solunar_test_with_coords.xlsx"
 
 st.set_page_config(page_title="Kamloops Fishing Advisor", layout="centered")
 
 st.title("Kamloops Fishing Advisor")
-st.write("Select a lake and a date to get fly types and starting depths.")
+st.write("Choose a lake, or let the app suggest the best stocked lakes for your date.")
 
 @st.cache_data
 def load_lakes(path: str):
@@ -17,6 +18,7 @@ def load_lakes(path: str):
 
     name_col = df.columns[0]
     species_col = "Species" if "Species" in df.columns else None
+    score_col = "EffectiveQty" if "EffectiveQty" in df.columns else None
 
     lakes = []
     for _, r in df.iterrows():
@@ -26,28 +28,79 @@ def load_lakes(path: str):
         name = str(nm).strip()
         if not name:
             continue
-        species = str(r.get(species_col, "Rainbow Trout")) if species_col else "Rainbow Trout"
-        lakes.append((name, species))
 
-    lakes.sort(key=lambda x: x[0].lower())
-    return lakes
+        species = str(r.get(species_col, "Rainbow Trout")).strip() if species_col else "Rainbow Trout"
 
-XLSX_PATH = "kamloops_stocking_solunar_test_with_coords.xlsx"
+        try:
+            score = float(r.get(score_col, 0)) if score_col else 0.0
+        except Exception:
+            score = 0.0
+
+        lakes.append({"name": name, "species": species, "score": score})
+
+    # For dropdown (alphabetical)
+    lakes_alpha = sorted(lakes, key=lambda x: x["name"].lower())
+
+    # For suggestions (highest stocking score first)
+    lakes_ranked = sorted(lakes, key=lambda x: x["score"], reverse=True)
+
+    return lakes_alpha, lakes_ranked
 
 try:
-    lakes = load_lakes(XLSX_PATH)
+    lakes_alpha, lakes_ranked = load_lakes(XLSX_PATH)
 except Exception as e:
     st.error(f"Could not open workbook '{XLSX_PATH}': {e}")
     st.stop()
 
-lake_names = [l[0] for l in lakes]
-selected_lake = st.selectbox("Lake", lake_names)
+# ---- Mode selector ----
+mode = st.radio(
+    "Mode",
+    ["I know my lake", "Suggest lakes for me"],
+    horizontal=True
+)
 
 selected_date = st.date_input("Date", value=date.today())
 date_str = selected_date.strftime("%Y-%m-%d")
-
-species = next((l[1] for l in lakes if l[0] == selected_lake), "Rainbow Trout")
 season = season_from_date(date_str)
+
+# Keep a selected lake in session state so “Use this lake” works cleanly
+if "selected_lake" not in st.session_state:
+    st.session_state.selected_lake = lakes_alpha[0]["name"] if lakes_alpha else ""
+
+# ---- Suggest mode ----
+if mode == "Suggest lakes for me":
+    st.subheader("Top suggested lakes (based on stocking score)")
+    st.caption("This ranking uses the stocking score from the spreadsheet. It does not use weather or moon phases.")
+
+    top_n = 3
+    top = lakes_ranked[:top_n]
+
+    if not top:
+        st.warning("No lakes found in the spreadsheet.")
+    else:
+        for i, l in enumerate(top, 1):
+            with st.container(border=True):
+                st.markdown(f"### {i}. {l['name']}")
+                st.write(f"**Season:** {season}")
+                st.write(f"**Stocked/target species:** {l['species']}")
+                st.write(f"**Stocking score:** {l['score']:.0f}")
+
+                if st.button(f"Use {l['name']}", key=f"use_{i}", use_container_width=True):
+                    st.session_state.selected_lake = l["name"]
+
+    st.divider()
+
+# ---- Lake dropdown (always available) ----
+lake_names = [l["name"] for l in lakes_alpha]
+default_index = 0
+if st.session_state.selected_lake in lake_names:
+    default_index = lake_names.index(st.session_state.selected_lake)
+
+selected_lake = st.selectbox("Lake", lake_names, index=default_index)
+st.session_state.selected_lake = selected_lake
+
+# Find species for chosen lake
+species = next((l["species"] for l in lakes_alpha if l["name"] == selected_lake), "Rainbow Trout")
 
 if st.button("Get recommendation", use_container_width=True):
     recs = recommend_flies_with_depth(species, season)
